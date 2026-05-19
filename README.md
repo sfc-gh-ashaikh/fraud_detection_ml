@@ -52,16 +52,6 @@ snow sql -f scripts/teardown.sql
 |-------------|----------|-----------|---------|
 | FRAUD_DEMO_CPU_POOL | CPU_X64_XS | 0.06 | Model serving (XGBoost inference, ~50ms/request) |
 
-## Annual Cost Estimate
-
-| Component | Annual Credits | Annual Cost (@$4.58) |
-|-----------|---------------|---------------------|
-| DT refresh (SMALL WH, 5 DTs) | 730 | $3,343 |
-| SPCS endpoint (CPU_X64_XS, 24/7) | 526 | $2,409 |
-| Training (monthly retrain, SP-Opt MEDIUM) | 6 | $27 |
-| **Total** | **~1,262** | **~$5,780/yr** |
-
-vs. current multi-system stack (SageMaker + Redis + Spark + DynamoDB): ~$20-40k/yr
 
 ## Key Metrics
 
