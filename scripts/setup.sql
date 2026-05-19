@@ -11,11 +11,6 @@
 --   - Snowpark-optimized warehouse for ML training (256GB dedicated RAM)
 --   - CPU_X64_XS compute pool for model serving (right-sized for XGBoost)
 --
--- COST ESTIMATE (production-like, annual):
---   DT refresh (SMALL WH):        ~$3,343/yr
---   SPCS endpoint (CPU_X64_XS):   ~$2,409/yr
---   Training (monthly retrain):   ~$27/yr
---   TOTAL:                        ~$5,780/yr
 -- =============================================================================
 
 USE ROLE ACCOUNTADMIN;
@@ -72,7 +67,7 @@ CREATE SCHEMA IF NOT EXISTS FRAUD_DEMO_PROD.MONITORING;
 -- FRAUD_DEMO_LOAD_WH: Standard LARGE (8 credits/hr)
 -- PURPOSE: One-time bulk data generation (12M rows)
 -- WHY LARGE: Processes 12M rows in ~2-3 minutes vs 10+ on MEDIUM.
---   At AUTO_SUSPEND=60s, total cost for a single load = ~0.3 credits ($1.37).
+--   At AUTO_SUSPEND=60s, total cost for a single load is minimal.
 --   A smaller warehouse would take longer, costing similar credits but wasting time.
 -- INITIALLY_SUSPENDED: Only starts when first used (no idle cost).
 CREATE WAREHOUSE IF NOT EXISTS FRAUD_DEMO_LOAD_WH
@@ -108,7 +103,7 @@ CREATE WAREHOUSE IF NOT EXISTS FRAUD_DEMO_WH
 -- MAX_CONCURRENCY_LEVEL=1: Ensures the training job gets exclusive access to all resources.
 --   Multiple concurrent training jobs would compete for RAM and slow each other down.
 -- PERFORMANCE: Training completes in ~3-5 minutes (vs hours on undersized instances).
---   Cost per training run: ~0.5 credits ($2.29). Monthly retrain = $27/year.
+--   Training completes in ~3-5 minutes per run.
 -- INITIALLY_SUSPENDED: Only starts when training begins. Suspends 60s after completion.
 CREATE WAREHOUSE IF NOT EXISTS FRAUD_DEMO_TRAIN_WH
     WAREHOUSE_SIZE = 'MEDIUM'
@@ -133,14 +128,14 @@ CREATE WAREHOUSE IF NOT EXISTS FRAUD_DEMO_TRAIN_WH
 -- WHY MAX_NODES=2:
 --   - Provides burst capacity + high availability (if one node restarts, other serves)
 --   - Second node only spins up under sustained load, otherwise idle (no cost)
--- ANNUAL SAVING vs CPU_X64_S: (0.11 - 0.06) × 8760 = 438 credits = ~$2,006/year
+-- CPU_X64_XS is right-sized for XGBoost inference workloads.
 -- FUTURE OPTIMISATION: If P99 latency exceeds 100ms under peak load, scale to CPU_X64_S.
 --   Monitor via service metrics (request_latency_p99).
 CREATE COMPUTE POOL IF NOT EXISTS FRAUD_DEMO_CPU_POOL
     MIN_NODES = 1
     MAX_NODES = 2
     INSTANCE_FAMILY = CPU_X64_XS
-    COMMENT = 'Fraud model serving. XS is right-sized for XGBoost inference. Saves $2k/yr vs S.';
+    COMMENT = 'Fraud model serving. XS is right-sized for XGBoost inference.';
 
 -- =============================================================================
 -- SECTION 5: ROLES & GRANTS
