@@ -1,6 +1,6 @@
 # Real-Time Fraud Detection on Snowflake
 
-> End-to-end ML fraud detection pipeline — from raw transactions to real-time scoring in under 200ms — built entirely on Snowflake. Replaces a multi-service architecture (SageMaker + Redis + Spark Streaming) with a single platform.
+> Catch fraud faster by keeping features fresh. This demo shows how sub-minute feature freshness — powered by Snowflake Dynamic Tables — directly improves fraud hit rates by detecting card-testing attacks that stale daily features miss entirely.
 
 ---
 
@@ -8,45 +8,53 @@
 
 1. [Problem Statement](#problem-statement)
 2. [Proposed Architecture](#proposed-architecture)
-3. [Key Results](#key-results)
+3. [Key Outcomes](#key-outcomes)
 4. [Prerequisites](#prerequisites)
 5. [Setup Guide](#setup-guide)
 6. [Notebook Walkthrough](#notebook-walkthrough)
-7. [Warehouse & Compute Strategy](#warehouse--compute-strategy)
-8. [Design Decisions](#design-decisions)
-9. [Supporting Documentation](#supporting-documentation)
-10. [Teardown](#teardown)
+7. [Design Decisions](#design-decisions)
+8. [Supporting Documentation](#supporting-documentation)
+9. [Teardown](#teardown)
 
 ---
 
 ## Problem Statement
 
-### Current State (Multi-Service Architecture)
+### The Business Problem
 
-| Component | Technology | Pain Point |
-|-----------|-----------|------------|
-| Feature computation | Spark Streaming + dbt (daily) | 24-hour stale features miss rapid card-testing attacks |
-| Feature serving | Redis / DynamoDB | Separate infra to maintain, sync issues, cache invalidation bugs |
-| Model training | SageMaker | Slow iteration (~hours), data must leave Snowflake |
-| Model serving | SageMaker endpoint | Low latency (~20ms) but features are 24h stale |
-| Monitoring | Custom CloudWatch + manual | No automated drift detection or retraining |
+Fraud losses are directly tied to how fresh your features are.
 
-### Core Challenges
+A typical BNPL product processes ~66,000 transactions per day at a 0.05% fraud rate — roughly 33 fraud cases daily, each costing ~$200 on average. That's ~$6,600/day in fraud exposure. The most damaging pattern is **card testing**: fraudsters make 5-10 rapid purchases in under 30 seconds to validate stolen credentials before executing high-value transactions.
 
-- **Stale features**: Daily dbt refresh means velocity features (e.g., "purchases in last hour") are up to 24 hours old. Card-testing attacks complete in 30 seconds — the model never sees them.
-- **Infrastructure sprawl**: 5+ services to coordinate (Snowflake → Spark → Redis → SageMaker → CloudWatch). Each introduces failure modes and sync lag.
-- **Slow iteration**: Training requires data export, environment setup, and SageMaker orchestration. A single experiment takes hours.
-- **No automated recovery**: When model performance degrades, the team discovers it manually days later.
+The model's ability to catch these attacks depends entirely on one thing: **can it see the velocity spike in time?**
 
-### What Success Looks Like
+### Why Feature Freshness Determines Fraud Hit Rate
 
-| Requirement | Target |
-|-------------|--------|
-| Feature freshness | < 60 seconds (catch rapid card-testing) |
-| Scoring latency | < 500ms P95 (real-time decisioning) |
-| Training iteration | < 10 minutes (rapid experimentation) |
-| Infrastructure | Single platform (reduce operational overhead) |
-| Monitoring | Automated drift detection + retraining triggers |
+The most predictive signals in fraud detection are velocity features — "how many purchases has this customer made in the last hour?" or "how many distinct merchants in the last 6 hours?" These features only work if they reflect what's happening *right now*.
+
+| Feature Freshness | What the Model Sees | Fraud Outcome |
+|-------------------|--------------------|--------------| 
+| **24 hours (daily batch)** | Yesterday's activity | Card-testing attack completes undetected. Model sees zero velocity spike. All fraudulent transactions approved. |
+| **< 60 seconds (Dynamic Tables)** | Current activity | After the 2nd-3rd rapid purchase, velocity features spike. Model flags remaining transactions in the burst. Attack interrupted. |
+
+In concrete terms: a card-testing attack that completes in 30 seconds is **invisible** to a model running on 24-hour-old features. The velocity features (purchases_num_l1h, distinct_merchants_l1h) still show yesterday's values. The model has no signal to act on.
+
+With sub-minute freshness, the same attack triggers velocity spikes within one Dynamic Table refresh cycle (~20-40 seconds). The model sees the burst developing and can block subsequent transactions before the fraudster completes their sequence.
+
+### Current State vs Desired State
+
+| | Current (Daily Batch) | Desired (Real-Time) |
+|---|---|---|
+| **Feature freshness** | 24 hours | < 60 seconds |
+| **Card-testing detection** | Missed entirely | Caught mid-attack |
+| **Fraud losses from velocity attacks** | Full exposure (~$6,600/day) | Reduced by catching attacks in-flight |
+| **Model iteration speed** | Hours per experiment | Minutes |
+| **Operational complexity** | 5+ services to coordinate | Single platform |
+| **Drift detection** | Manual (days to notice) | Automated (hours after labels arrive) |
+
+### The Core Insight
+
+This isn't a model accuracy problem — it's a **data freshness problem**. The same model, with the same features and the same weights, produces dramatically different fraud hit rates depending solely on whether those features reflect what happened 24 hours ago or 30 seconds ago.
 
 ---
 
@@ -65,7 +73,7 @@ Customer taps card
 ③ Feature lookup from pre-computed DTs        (~15ms point query)
   │
   ▼
-④ Score via SPCS model endpoint               (~105ms median via PrivateLink)
+④ Score via SPCS model endpoint               (sub-second)
   │
   ▼
 ⑤ Decision: approve / flag / block            (instant)
@@ -101,14 +109,14 @@ Customer taps card
 Payment Gateway
       │
       ▼
-AWS API Gateway (auth, WAF, rate-limiting, CloudTrail)
+AWS API Gateway (auth, WAF, rate-limiting)
       │
       ▼  (AWS PrivateLink — no public internet)
       │
 SPCS Container (private endpoint)
       │
       ├── Reads features from Dynamic Table (always current, <60s fresh)
-      ├── Runs XGBoost inference (~100ms)
+      ├── Runs XGBoost inference
       │
       ▼
 Approve / Flag / Block
@@ -116,24 +124,17 @@ Approve / Flag / Block
 
 ---
 
-## Key Results
+## Key Outcomes
 
-| Metric | Before (SageMaker + Redis) | After (Snowflake) |
-|--------|---------------------------|-------------------|
+| Outcome | Before (Daily Batch) | After (Snowflake) |
+|---------|---------------------|-------------------|
 | Feature freshness | 24 hours | 20-40 seconds |
-| Scoring latency | ~20ms (but stale features) | ~115ms (always-fresh features) |
-| Training time | Hours | 3-5 minutes |
-| Infrastructure components | 5+ services | 1 platform |
-| Monthly infra cost | ~$14,500+ (AWS + Snowflake + Redis) | ~$13,388 (Snowflake only) |
-| Fraud detection (card testing) | Missed (features too stale) | Caught within 1 DT refresh cycle |
-| Model monitoring | Manual (days to detect degradation) | Automated (alert within hours of label arrival) |
-
-### Scoring Path Options
-
-| Path | Median Latency | P95 | Best For |
-|------|---------------|-----|----------|
-| Direct HTTP via PrivateLink | ~115ms | ~270ms | Real-time decisioning (sub-500ms SLA) |
-| SQL service function | ~530ms | ~1,090ms | Async pipelines, batch re-scoring |
+| Card-testing detection | Missed (invisible to model) | Caught within one DT refresh cycle |
+| Fraud hit rate (velocity attacks) | Near zero | Significantly improved |
+| Time to retrain | Hours (data export + SageMaker) | 3-5 minutes (in-platform) |
+| Infrastructure complexity | 5+ services | 1 platform |
+| Drift detection | Manual discovery (days) | Automated alerting (hours after label arrival) |
+| Model monitoring | Ad-hoc | Continuous (AUC-PR baseline + PSI drift) |
 
 ---
 
@@ -145,7 +146,7 @@ Approve / Flag / Block
 | Role | ACCOUNTADMIN (for initial setup) |
 | Snowflake CLI | `snow` CLI installed ([install guide](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation)) |
 | Snowpark ML | `snowflake-ml-python` >= 1.5.4 |
-| Region | Any AWS region (PrivateLink for production) |
+| Region | Any AWS region |
 
 ---
 
@@ -153,29 +154,23 @@ Approve / Flag / Block
 
 ### Step 1: Infrastructure Setup
 
-Run the setup script to create all databases, warehouses, roles, schemas, and compute pools:
-
 ```bash
 snow sql -f scripts/setup.sql
 ```
 
-This creates:
-- 3 databases: `FRAUD_DEMO_DEV`, `FRAUD_DEMO_STAGING`, `FRAUD_DEMO_PROD`
-- 3 warehouses (right-sized per workload)
-- 1 SPCS compute pool
-- Schemas for each workload stage (TRANSACTIONS, FEATURES, ML, SERVING, MONITORING)
+Creates all databases, warehouses, roles, schemas, and compute pools needed for the demo.
 
 ### Step 2: Execute Notebooks (in order)
 
-Run each notebook sequentially in Snowsight or your local environment. Each notebook is self-contained with context setup at the top.
+Run each notebook sequentially in Snowsight or your local environment. Each is self-contained with context setup at the top.
 
-| # | Notebook | Duration | Warehouse Used |
+| # | Notebook | Duration | What It Proves |
 |---|----------|----------|----------------|
-| 1 | `nb01_data_generation.ipynb` | ~3 min | FRAUD_DEMO_LOAD_WH (LARGE) |
-| 2 | `nb02_feature_engineering.ipynb` | ~5 min | FRAUD_DEMO_WH (MEDIUM) |
-| 3 | `nb03_training.ipynb` | ~5 min | FRAUD_DEMO_TRAIN_WH (SP-Opt MEDIUM) |
-| 4 | `nb04_serving.ipynb` | ~10 min | FRAUD_DEMO_CPU_POOL (SPCS) |
-| 5 | `nb05_monitoring.ipynb` | ~5 min | FRAUD_DEMO_WH (SMALL) |
+| 1 | `nb01_data_generation.ipynb` | ~3 min | Generates realistic 12M-transaction dataset with production fraud patterns |
+| 2 | `nb02_feature_engineering.ipynb` | ~5 min | Sub-minute feature freshness via Dynamic Tables (measured, not theoretical) |
+| 3 | `nb03_training.ipynb` | ~5 min | Full model training cycle in minutes, not hours |
+| 4 | `nb04_serving.ipynb` | ~10 min | Real-time scoring with latency benchmarks |
+| 5 | `nb05_monitoring.ipynb` | ~5 min | Automated drift detection + business case for freshness |
 
 ### Step 3: Teardown (when done)
 
@@ -183,115 +178,85 @@ Run each notebook sequentially in Snowsight or your local environment. Each note
 snow sql -f scripts/teardown.sql
 ```
 
-Removes all objects created by this demo. No orphaned resources.
-
 ---
 
 ## Notebook Walkthrough
 
 ### Notebook 1: Synthetic Data Generation
 
-**Purpose:** Generate 12M training transactions (6 months) + 500k inference transactions (1 week) that replicate production entity volumes and fraud patterns.
+**Purpose:** Generate 12M training transactions (6 months) + 500k inference transactions (1 week) replicating production entity volumes and fraud patterns.
 
 **What it does:**
 - Creates dimension tables for all 5 entities (Customer, Merchant, Wallet DPAN, IP, Card Token)
-- Generates 12M rows in 4 batches of 3M (avoids memory pressure)
-- Applies realistic fraud patterns at 0.05% rate (~6,000 fraud cases)
-- Clusters table by `transaction_ts` for downstream DT efficiency
+- Generates 12M rows with realistic fraud patterns at 0.05% rate (~6,000 fraud cases)
+- Clusters table by `transaction_ts` for downstream efficiency
 
-**Key design choice:** 0.05% fraud rate (1 in 2,000) matches production exactly. This extreme imbalance drives all downstream model decisions (scale_pos_weight, AUC-PR metric, threshold tuning).
+**Why it matters:** The 0.05% fraud rate (1 in 2,000) creates the extreme class imbalance that makes fraud detection genuinely hard. This isn't a toy dataset — it replicates the real challenge.
 
 ---
 
 ### Notebook 2: Feature Engineering (Dynamic Tables + Feature Store)
 
-**Purpose:** Build the real-time feature layer — 5 entity-level Dynamic Tables computing 147 features with sub-minute freshness.
+**Purpose:** Build the real-time feature layer that makes card-testing detection possible. This is the core value driver of the architecture.
 
 **What it does:**
-- Creates 5 entity DTs (one per entity, all 5 time windows in a single GROUP BY pass)
-- Creates a combined features DT (joins entities + computes derived features)
-- Registers Feature Store entities and Feature Views
-- Runs a live freshness benchmark: INSERT → poll → measure actual DT lag
+- Creates 5 entity-level Dynamic Tables computing rolling velocity features across 5 time windows (1h, 6h, 24h, 48h, 1wk)
+- Registers features in the Snowflake Feature Store
+- Runs a live freshness benchmark: INSERT a transaction → measure how quickly features update
 
-**Key design choice:** 5 DTs (not 25). One DT per entity computes all windows in one pass using conditional aggregation = 80% cost reduction vs separate DTs per window.
+**Why it matters:** This is where the fraud hit rate improvement comes from. A feature like `purchases_num_l1h` (purchases in last hour) is the primary signal for card-testing detection. If it's 24 hours stale, it's useless. If it's 30 seconds stale, it catches the attack.
 
 **Feature entities:**
 
-| Entity | Features | Time Windows |
-|--------|----------|--------------|
-| Customer | 65 | 1h, 6h, 24h, 48h, 1wk |
-| Merchant | 20 | 1h, 6h, 24h, 48h, 1wk |
-| Wallet DPAN | 15 | 1h, 6h, 24h, 48h, 1wk |
-| IP Address | 12 | Variable |
-| Customer-Merchant | 10 | 1h, 6h, 24h, 48h, 1wk |
+| Entity | Features | What It Detects |
+|--------|----------|-----------------|
+| Customer | 65 | Unusual spending velocity, geographic anomalies |
+| Merchant | 20 | Merchant under attack (many cards tested) |
+| Wallet DPAN | 15 | Compromised card (shared across customers) |
+| IP Address | 12 | Bot farm (many customers from single IP) |
+| Customer-Merchant | 10 | Repeated rapid purchases at same merchant |
 
 ---
 
 ### Notebook 3: Model Training (XGBoost)
 
-**Purpose:** Train an XGBoost fraud classifier on 12M transactions with 147 features, handling extreme class imbalance.
+**Purpose:** Train a fraud classifier and register it for production deployment — demonstrating that the full training cycle takes minutes, enabling rapid iteration.
 
 **What it does:**
-- Loads training data via Feature Store joins
-- Trains XGBoost with `scale_pos_weight=2000` (no oversampling needed)
-- Evaluates with AUC-PR (not ROC-AUC — appropriate for extreme imbalance)
-- Registers model in Snowflake Model Registry
-- Promotes model: DEV → STAGING → PROD
+- Trains XGBoost on 12M transactions with 147 features
+- Handles extreme class imbalance (0.05%) without oversampling
+- Evaluates with fraud-appropriate metrics (AUC-PR)
+- Registers model in Snowflake Model Registry with DEV → STAGING → PROD promotion
 
-**Key design choice:** Snowpark-Optimized MEDIUM warehouse (256GB dedicated RAM at 6 credits/hr). Cheaper than Standard XLARGE (16 credits/hr) with more usable memory.
-
-**Result:** ~80% recall at chosen operating point. Training cost: ~0.5 credits (~$2.29) per run.
+**Why it matters:** When fraud patterns shift (new attack vectors, seasonal changes), the team needs to retrain quickly. A 5-minute training cycle means same-day response to emerging threats, not week-long projects.
 
 ---
 
 ### Notebook 4: Model Serving & Latency Benchmarks (SPCS)
 
-**Purpose:** Deploy the model as a REST endpoint on Snowpark Container Services and benchmark real-world scoring latency.
+**Purpose:** Deploy the model as a REST endpoint and prove it can score transactions fast enough for real-time decisioning.
 
 **What it does:**
-- Deploys model to SPCS via Model Registry `create_service()`
+- Deploys model to Snowpark Container Services via the Model Registry
 - Benchmarks two scoring paths (SQL service function vs direct HTTP)
-- Runs sustained load test (60 txn/min) and burst test (10 concurrent x 10 bursts)
-- Measures cold-start, warm median, P95, P99 for each path
-- Provides production architecture recommendation
+- Runs sustained and burst load tests at production volumes
+- Provides production architecture recommendation with PrivateLink
 
-**Key findings:**
-
-| Metric | SQL Path | HTTP Path (PrivateLink est.) |
-|--------|---------|-------------------------------|
-| Warm Median | 529ms | ~115ms |
-| P95 | 1,090ms | ~270ms |
-| P95 < 500ms SLA | FAIL | PASS |
-
-**Recommendation:** Direct HTTP via PrivateLink for real-time decisioning. SQL path for async/batch workloads.
+**Why it matters:** A fraud decision must happen before the transaction is approved. This notebook proves the model can return a score fast enough to block in real-time — not just in theory, but under realistic concurrent load.
 
 ---
 
 ### Notebook 5: Monitoring, Drift Detection & Cost Analysis
 
-**Purpose:** Set up production monitoring — inference logging, performance tracking, drift detection, automated retraining, and cost/benefit analysis.
+**Purpose:** Close the loop — ensure the model stays effective over time and quantify the business value of feature freshness.
 
 **What it does:**
-- Creates inference logging table (predictions + features for audit)
-- Simulates chargeback label arrival (24-72 hour delay)
-- Creates Model Monitor (AUC-PR baseline + PSI drift detection)
-- Analyses DT compute cost at different TARGET_LAG settings
-- Compares before (daily dbt) vs after (1-minute DT) economics
+- Sets up inference logging for audit and performance tracking
+- Creates a Model Monitor with automated drift detection (PSI)
+- Alerts when model performance degrades (AUC-PR drop > 5%)
+- Analyses the relationship between feature freshness and fraud losses avoided
 
-**Key insight:** At 66k txns/day with $200 avg fraud loss, catching just 2 extra fraud cases/day pays for the entire DT compute pipeline ($9.30/day). The ROI is immediate.
-
----
-
-## Warehouse & Compute Strategy
-
-| Resource | Type | Size | Credits/hr | Purpose | When Active |
-|----------|------|------|-----------|---------|-------------|
-| FRAUD_DEMO_LOAD_WH | Standard | LARGE | 8 | Data generation (12M rows) | One-time (~3 min) |
-| FRAUD_DEMO_WH | Standard | SMALL | 2 | DT refresh + general queries | 24/7 (DT pipeline) |
-| FRAUD_DEMO_TRAIN_WH | Snowpark-Optimized | MEDIUM | 6 | ML training (256GB RAM) | Monthly (~5 min/run) |
-| FRAUD_DEMO_CPU_POOL | SPCS | CPU_X64_XS | 0.06 | Model serving (REST endpoint) | 24/7 (always warm) |
-
-**Monthly cost estimate:** ~$13,388 (dominated by DT warehouse running 24/7 at $13,190/month).
+**Why it matters:** Fraud patterns evolve. Without automated monitoring, model degradation goes unnoticed for days — during which fraud losses mount. This notebook proves the system self-heals: detect drift → alert → trigger retrain → deploy updated model.
 
 ---
 
@@ -299,14 +264,14 @@ Removes all objects created by this demo. No orphaned resources.
 
 | # | Decision | Choice | Rationale |
 |---|----------|--------|-----------|
-| 1 | 5 DTs (not 25) | One DT per entity, all windows in single pass | 80% cost reduction vs separate DTs per window |
-| 2 | Snowpark-Optimized for training | MEDIUM (6 credits/hr, 256GB RAM) | Cheaper AND more memory than Standard XLARGE (16 credits/hr) |
-| 3 | CPU_X64_XS for serving | Smallest SPCS instance | Right-sized for XGBoost inference. Saves ~$2k/yr vs CPU_X64_S |
-| 4 | CLUSTER BY (transaction_ts) | Linear clustering on timestamp | DT refreshes only read recent micro-partitions, not full table scan |
-| 5 | Pattern A (stateless endpoint) | Features pre-computed, passed in request | Endpoint does pure ML inference — fastest possible path |
-| 6 | scale_pos_weight=2000 | Inverse of fraud rate | Handles 0.05% fraud without memory-expensive oversampling |
-| 7 | AUC-PR metric | Not ROC-AUC | Appropriate for extreme class imbalance (ROC-AUC is misleading) |
-| 8 | PrivateLink (production) | No public ingress | Security + low latency. No data leaves Snowflake's network |
+| 1 | 5 DTs (not 25) | One DT per entity, all windows in single pass | Efficient compute — one table scan per entity per refresh |
+| 2 | Snowpark-Optimized for training | MEDIUM with 256GB dedicated RAM | Faster training with more usable memory |
+| 3 | CLUSTER BY (transaction_ts) | Linear clustering on timestamp | DT refreshes only read recent data, not full history |
+| 4 | Pattern A (stateless endpoint) | Features pre-computed, passed in request | Fastest scoring path — endpoint does pure inference |
+| 5 | scale_pos_weight=2000 | Inverse of fraud rate | Handles extreme imbalance without oversampling |
+| 6 | AUC-PR metric | Not ROC-AUC | Meaningful at 0.05% fraud (ROC-AUC is misleading) |
+| 7 | PrivateLink (production) | No public ingress | Data never leaves Snowflake's network |
+| 8 | Automated retraining | Monthly + drift-triggered | Adapts to evolving fraud patterns without manual intervention |
 
 ---
 
@@ -314,22 +279,20 @@ Removes all objects created by this demo. No orphaned resources.
 
 | Document | Description |
 |----------|-------------|
-| [`docs/architecture.md`](docs/architecture.md) | Detailed architecture diagrams, DT DAG, production deployment pattern, latency trade-offs, and deployment checklist |
-| [`docs/feature_catalogue.md`](docs/feature_catalogue.md) | Full specification of all 170+ features (147 used at scoring time), grouped by entity with computation details |
-| [`scripts/setup.sql`](scripts/setup.sql) | Infrastructure-as-code: all databases, warehouses, roles, schemas, compute pools |
+| [`docs/architecture.md`](docs/architecture.md) | Detailed architecture diagrams, production deployment pattern, latency benchmarks, and deployment checklist |
+| [`docs/feature_catalogue.md`](docs/feature_catalogue.md) | Full specification of all features, grouped by entity with computation details |
+| [`scripts/setup.sql`](scripts/setup.sql) | Infrastructure setup: databases, warehouses, roles, schemas, compute pools |
 | [`scripts/teardown.sql`](scripts/teardown.sql) | Clean removal of all demo objects |
 
 ---
 
 ## Teardown
 
-To remove all resources created by this demo:
-
 ```bash
 snow sql -f scripts/teardown.sql
 ```
 
-This drops all 3 databases, all warehouses, and the compute pool. No orphaned objects remain.
+Removes all databases, warehouses, and compute pools. No orphaned objects.
 
 ---
 
@@ -340,7 +303,7 @@ fraud_detection_ml/
 ├── README.md                              # This file (start here)
 ├── docs/
 │   ├── architecture.md                    # Detailed architecture + production patterns
-│   └── feature_catalogue.md              # Full 170+ feature specification
+│   └── feature_catalogue.md              # Full feature specification
 ├── scripts/
 │   ├── setup.sql                          # Infrastructure setup (run first)
 │   └── teardown.sql                       # Clean removal (run last)
