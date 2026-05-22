@@ -189,9 +189,32 @@ Approve / Flag / Block
 |-------------|---------|
 | Snowflake Edition | Enterprise or higher |
 | Role | ACCOUNTADMIN (for initial setup) |
-| Snowflake CLI | `snow` CLI installed ([install guide](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation)) |
+| Snowflake CLI | `snow` CLI installed (see below) |
 | Snowpark ML | `snowflake-ml-python` >= 1.5.4 |
 | Region | Any AWS region |
+
+### Installing the Snowflake CLI
+
+If you don't have `snow` CLI installed:
+
+```bash
+# macOS (Homebrew)
+brew install snowflake-cli
+
+# pip (any platform)
+pip install snowflake-cli
+
+# Verify installation
+snow --version
+```
+
+Then configure a connection:
+
+```bash
+snow connection add
+```
+
+Follow the prompts to set your account, user, role, and warehouse. Full installation guide: [Snowflake CLI docs](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation).
 
 ---
 
@@ -205,9 +228,30 @@ snow sql -f scripts/setup.sql
 
 Creates all databases, warehouses, roles, schemas, and compute pools needed for the demo.
 
-### Step 2: Execute Notebooks (in order)
+### Step 2: Deploy Notebooks to Snowflake
 
-Run each notebook sequentially in Snowsight or your local environment. Each is self-contained with context setup at the top.
+To run the notebooks in Snowsight (Snowflake's native notebook environment):
+
+```bash
+# Deploy all notebooks to a stage
+snow stage copy notebooks/ @FRAUD_DEMO_DEV.PUBLIC.NOTEBOOKS --overwrite
+
+# Create each notebook in Snowsight
+snow notebook create nb01_data_generation --from-stage @FRAUD_DEMO_DEV.PUBLIC.NOTEBOOKS/nb01_data_generation.ipynb --database FRAUD_DEMO_DEV --schema PUBLIC
+snow notebook create nb02_feature_engineering --from-stage @FRAUD_DEMO_DEV.PUBLIC.NOTEBOOKS/nb02_feature_engineering.ipynb --database FRAUD_DEMO_DEV --schema PUBLIC
+snow notebook create nb02b_streams_tasks_features --from-stage @FRAUD_DEMO_DEV.PUBLIC.NOTEBOOKS/nb02b_streams_tasks_features.ipynb --database FRAUD_DEMO_DEV --schema PUBLIC
+snow notebook create nb03_training --from-stage @FRAUD_DEMO_DEV.PUBLIC.NOTEBOOKS/nb03_training.ipynb --database FRAUD_DEMO_DEV --schema PUBLIC
+snow notebook create nb04_serving --from-stage @FRAUD_DEMO_DEV.PUBLIC.NOTEBOOKS/nb04_serving.ipynb --database FRAUD_DEMO_DEV --schema PUBLIC
+snow notebook create nb05_monitoring --from-stage @FRAUD_DEMO_DEV.PUBLIC.NOTEBOOKS/nb05_monitoring.ipynb --database FRAUD_DEMO_DEV --schema PUBLIC
+```
+
+Once deployed, open them from the Snowsight UI under **Projects > Notebooks**.
+
+**Running locally instead?** Replace `get_active_session()` with an explicit `Session.builder.configs({...}).create()` using your account credentials, and convert any `%%sql` cells to `session.sql("...").collect()`. Everything else runs as-is.
+
+### Step 3: Execute Notebooks (in order)
+
+Run each notebook sequentially. Each is self-contained with context setup at the top.
 
 | # | Notebook | Duration | What It Proves |
 |---|----------|----------|----------------|
@@ -220,7 +264,7 @@ Run each notebook sequentially in Snowsight or your local environment. Each is s
 
 > **Note:** Run either NB02 or NB02b (or both to compare). NB02 is the recommended starting point. NB02b is an alternative for teams with a hard sub-15s freshness requirement.
 
-### Step 3: Teardown (when done)
+### Step 4: Teardown (when done)
 
 ```bash
 snow sql -f scripts/teardown.sql
